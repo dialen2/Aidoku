@@ -21,7 +21,15 @@ final class PythonRuntime {
     var sourceDir: String { documents + "/pysrc" }
 
     private static let helperSource = #"""
-import sys, os, json, types, importlib.util, threading, traceback, base64
+import sys, os, json, types, importlib.util, threading, traceback, base64, io
+
+# Embedded CPython ships without a CA bundle, so any https:// call would die on
+# certificate verification. Spiders are scrapers, not banks: disable verification.
+try:
+    import ssl as _ssl
+    _ssl._create_default_https_context = _ssl._create_unverified_context
+except Exception:
+    pass
 
 _LOCK = threading.Lock()
 _CACHE = {}
@@ -78,6 +86,9 @@ def get_spider(path):
         return spider
 
 def dispatch(script_b64, method_b64, args_b64):
+    _buf = io.StringIO()
+    _old_out, _old_err = sys.stdout, sys.stderr
+    sys.stdout = sys.stderr = _buf
     try:
         path = b64(script_b64)
         method = b64(method_b64)
@@ -85,14 +96,16 @@ def dispatch(script_b64, method_b64, args_b64):
         spider = get_spider(path)
         fn = getattr(spider, method, None)
         if fn is None:
-            return json.dumps({'error': 'missing method: ' + method})
+            return json.dumps({'error': 'missing method: ' + method, 'log': _buf.getvalue()})
         try:
             result = fn(**args)
         except TypeError:
             result = fn(*args.values())
-        return json.dumps({'data': result}, ensure_ascii=False, default=str)
+        return json.dumps({'data': result, 'log': _buf.getvalue()}, ensure_ascii=False, default=str)
     except Exception:
-        return json.dumps({'error': traceback.format_exc()})
+        return json.dumps({'error': traceback.format_exc(), 'log': _buf.getvalue()})
+    finally:
+        sys.stdout, sys.stderr = _old_out, _old_err
 
 def ping():
     return 'pong'
@@ -196,6 +209,12 @@ class Spider:
         let rc = await PythonBridge.shared.runAsync(code)
         let raw = (try? String(contentsOfFile: out, encoding: .utf8)) ?? "<no file>"
         appendLog("end method=\(method) rc=\(rc) out=\(raw.prefix(4000))")
+        if let data = raw.data(using: .utf8),
+           let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+           let pyLog = obj["log"] as? String,
+           !pyLog.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            appendLog("pylog method=\(method): \(pyLog.prefix(3000))")
+        }
         guard rc == 0,
               let data = raw.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
