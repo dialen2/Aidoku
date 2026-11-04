@@ -136,9 +136,9 @@ final class PythonSourceRunner: AidokuRunner.Runner {
     func getHome() async throws -> AidokuRunner.Home {
         let raw = await call("homeContent", ["filter": false])
         let list = entries(raw).compactMap { manga($0) }
-        guard !list.isEmpty else { return .init(sections: []) }
-        return .init(sections: [
-            .init(id: "home", title: "最近更新", entries: list),
+        guard !list.isEmpty else { return .init(components: []) }
+        return .init(components: [
+            .init(title: nil, value: .mangaList(entries: list.map { $0.intoLink() })),
         ])
     }
 
