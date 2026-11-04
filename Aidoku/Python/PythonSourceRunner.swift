@@ -10,10 +10,12 @@ import Foundation
 
 extension AidokuRunner.Source {
     static func python(key: String, script: String) -> AidokuRunner.Source {
-        .init(
+        let name = (script as NSString).lastPathComponent
+            .replacingOccurrences(of: ".py", with: "")
+        return .init(
             url: URL(fileURLWithPath: script),
             key: key,
-            name: (script as NSString).lastPathComponent.replacingOccurrences(of: ".py", with: ""),
+            name: name,
             version: 1,
             languages: ["multi"],
             urls: [],
@@ -22,14 +24,12 @@ extension AidokuRunner.Source {
             staticListings: [],
             staticFilters: [],
             staticSettings: [],
-            runner: PythonSourceRunner(scriptPath: script)
+            runner: PythonSourceRunner(sourceKey: key, scriptPath: script)
         )
     }
 }
 
 final class PythonSourceRunner: AidokuRunner.Runner {
-    static let sourceKey = "python"
-
     let features = AidokuRunner.SourceFeatures(
         providesListings: false,
         providesHome: false,
@@ -43,16 +43,22 @@ final class PythonSourceRunner: AidokuRunner.Runner {
         providesBaseUrl: false
     )
 
+    let sourceKey: String
     let scriptPath: String
 
-    init(scriptPath: String) {
+    init(sourceKey: String, scriptPath: String) {
+        self.sourceKey = sourceKey
         self.scriptPath = scriptPath
     }
 
-    private func call(_ method: String, _ args: [String: Any]) -> [String: Any] {
-        let raw = PythonRuntime.shared.dispatch(scriptPath: scriptPath, method: method, args: args)
+    private func call(_ method: String, _ args: [String: Any]) async -> [String: Any] {
+        let raw = await PythonRuntime.shared.dispatch(
+            scriptPath: scriptPath,
+            method: method,
+            args: args
+        )
         if let err = raw["error"] as? String {
-            LogManager.logger.error("[python] \(method): \(err)")
+            LogManager.logger.error("[python] \(self.sourceKey) \(method): \(err)")
         }
         return raw
     }
@@ -75,7 +81,7 @@ final class PythonSourceRunner: AidokuRunner.Runner {
         guard let key = Self.str(item["vod_id"]) else { return nil }
         guard let title = Self.str(item["vod_name"]) ?? Self.str(item["vod_id"]) else { return nil }
         return AidokuRunner.Manga(
-            sourceKey: Self.sourceKey,
+            sourceKey: sourceKey,
             key: key,
             title: title,
             cover: Self.str(item["vod_pic"]),
@@ -90,7 +96,7 @@ final class PythonSourceRunner: AidokuRunner.Runner {
         page: Int,
         filters: [AidokuRunner.FilterValue]
     ) async throws -> AidokuRunner.MangaPageResult {
-        let raw = call("searchContent", [
+        let raw = await call("searchContent", [
             "key": query ?? "",
             "quick": false,
             "pg": String(page),
@@ -105,16 +111,13 @@ final class PythonSourceRunner: AidokuRunner.Runner {
         needsChapters: Bool
     ) async throws -> AidokuRunner.Manga {
         var manga = manga
-        let raw = call("detailContent", ["ids": [manga.key]])
+        let raw = await call("detailContent", ["ids": [manga.key]])
         guard let item = entries(raw).first else { return manga }
 
         if needsDetails {
             if let title = Self.str(item["vod_name"]) { manga.title = title }
             if let cover = Self.str(item["vod_pic"]) { manga.cover = cover }
             if let desc = Self.str(item["vod_content"]) { manga.description = desc }
-            if let remarks = Self.str(item["vod_remarks"]) {
-                manga.description = (manga.description ?? "") + (manga.description == nil ? "" : "\n") + remarks
-            }
         }
 
         if needsChapters {
@@ -140,20 +143,22 @@ final class PythonSourceRunner: AidokuRunner.Runner {
         manga: AidokuRunner.Manga,
         chapter: AidokuRunner.Chapter
     ) async throws -> [AidokuRunner.Page] {
-        let raw = call("playerContent", [
+        let raw = await call("playerContent", [
             "flag": "",
             "id": chapter.key,
             "vipFlags": [],
         ])
-        guard let data = raw["data"] as? [String: Any],
-              let url = Self.str(data["url"]) else {
-            return []
-        }
-        return url
+        guard let data = raw["data"] as? [String: Any] else { return [] }
+
+        // TVBox comic sources put the image list in `url`; some use `data`.
+        let blob = Self.str(data["url"]) ?? Self.str(data["data"]) ?? ""
+        guard !blob.isEmpty else { return [] }
+
+        return blob
             .split(separator: "#")
             .compactMap { piece -> AidokuRunner.Page? in
-                let text = String(piece)
-                guard let parsed = URL(string: text) else { return nil }
+                let text = String(piece).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let parsed = URL(string: text), parsed.scheme != nil else { return nil }
                 return AidokuRunner.Page(content: .url(url: parsed))
             }
     }

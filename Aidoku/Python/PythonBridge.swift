@@ -4,6 +4,7 @@
 //
 //  Embedded CPython runtime bridge.
 //  Python is linked as a dynamic framework and embedded into the app bundle.
+//  Every interpreter call is serialized on a background queue -- never the main thread.
 //
 
 import Foundation
@@ -11,7 +12,7 @@ import Foundation
 final class PythonBridge: @unchecked Sendable {
     static let shared = PythonBridge()
 
-    private let queue = DispatchQueue(label: "app.aidoku.python")
+    private let queue = DispatchQueue(label: "app.aidoku.python", qos: .userInitiated)
     private var ready = false
 
     private init() {}
@@ -47,21 +48,20 @@ final class PythonBridge: @unchecked Sendable {
         return true
     }
 
-    @discardableResult
-    func prepare() -> Bool {
-        queue.sync { prepareLocked() }
-    }
-
-    @discardableResult
-    func run(_ code: String) -> Int32 {
-        queue.sync {
-            guard prepareLocked() else { return -1 }
-            return PyRun_SimpleString(code)
+    /// Runs python source on the background queue. Never blocks the caller.
+    func runAsync(_ code: String) async -> Int32 {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Int32, Never>) in
+            queue.async {
+                guard self.prepareLocked() else {
+                    continuation.resume(returning: -1)
+                    return
+                }
+                continuation.resume(returning: PyRun_SimpleString(code))
+            }
         }
     }
 
-    func selfTest() -> String {
-        writeReport("{\"stage\":\"selftest-begin\"}")
+    func selfTest() async -> String {
         let out = NSTemporaryDirectory() + "aidoku-pyout.json"
         try? FileManager.default.removeItem(atPath: out)
         let code = """
@@ -72,13 +72,12 @@ final class PythonBridge: @unchecked Sendable {
             "prefix": sys.prefix,
             "executable": sys.executable,
             "cwd": os.getcwd(),
+            "files": sorted(os.listdir(sys.prefix + "/lib/python3.13")),
         }
         open(r"\(out)", "w").write(json.dumps(data))
         """
-        let rc = run(code)
+        let rc = await runAsync(code)
         let body = (try? String(contentsOfFile: out, encoding: .utf8)) ?? "<no output>"
-        let report = "{\"stage\":\"done\",\"rc\":\(rc),\"body\":\(body.debugDescription)}"
-        writeReport(report)
-        return report
+        return "{\"stage\":\"done\",\"rc\":\(rc),\"body\":\(body.debugDescription)}"
     }
 }

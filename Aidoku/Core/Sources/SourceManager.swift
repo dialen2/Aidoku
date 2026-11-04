@@ -978,22 +978,44 @@ extension SourceManager {
 
 // MARK: - Python Sources
 extension SourceManager {
+    private static func syncLog(_ message: String) {
+        guard let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask).first
+        else { return }
+        let path = dir.appendingPathComponent("pysync.log").path
+        let line = "[\(Date())] \(message)\n"
+        if let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            handle.closeFile()
+        } else {
+            try? line.write(toFile: path, atomically: true, encoding: .utf8)
+        }
+    }
+
     /// Auto-registers every `.py` file dropped into `Documents/pysrc`.
     func syncPythonSources() async {
-        _ = PythonRuntime.shared.bootstrap()
+        Self.syncLog("sync begin")
+        PythonRuntime.shared.bootstrap()
+        Self.syncLog("bootstrap done")
 
         let dir = PythonRuntime.shared.sourceDir
         let files = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+        Self.syncLog("found \(files.count) files")
 
         for file in files.sorted() where file.hasSuffix(".py") {
             let path = dir + "/" + file
             let alreadyLoaded = sourcesByKey.values.contains { source in
                 (source.runner as? PythonSourceRunner)?.scriptPath == path
             }
-            if alreadyLoaded { continue }
+            if alreadyLoaded {
+                Self.syncLog("skip \(file)")
+                continue
+            }
 
+            Self.syncLog("registering \(file)")
             let key = await createCustomSource(.python(script: path))
-            LogManager.logger.log("[python] registered source \(file) -> \(key ?? "nil")")
+            Self.syncLog("registered \(file) -> \(key ?? "nil")")
         }
+        Self.syncLog("sync end")
     }
 }

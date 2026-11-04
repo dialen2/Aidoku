@@ -3,6 +3,7 @@
 //  Aidoku
 //
 //  Python-side helper module and dispatch layer.
+//  All interpreter work happens off the main thread.
 //
 
 import Foundation
@@ -12,15 +13,12 @@ final class PythonRuntime {
 
     private init() {}
 
-    var bridgeDir: String {
-        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return dir.appendingPathComponent("pybridge").path
+    private var documents: String {
+        FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0].path
     }
 
-    var sourceDir: String {
-        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
-        return dir.appendingPathComponent("pysrc").path
-    }
+    var bridgeDir: String { documents + "/pybridge" }
+    var sourceDir: String { documents + "/pysrc" }
 
     private static let helperSource = #"""
 import sys, os, json, types, importlib.util, threading, traceback, base64
@@ -96,10 +94,8 @@ def dispatch(script_b64, method_b64, args_b64):
     except Exception:
         return json.dumps({'error': traceback.format_exc()})
 
-def ensure_dirs(bridge_dir_b64, source_dir_b64):
-    for d in (b64(bridge_dir_b64), b64(source_dir_b64)):
-        if not os.path.isdir(d):
-            os.makedirs(d)
+def ping():
+    return 'pong'
 """#
 
     private static let demoSource = #"""
@@ -139,29 +135,22 @@ class Spider:
         return {"parse": 0, "url": "#".join(pages)}
 """#
 
-    // Writes the helper module into the app's Documents directory once.
-    func bootstrap() -> String {
+    /// Creates the Documents layout and drops the helper + demo source. Pure Swift, no interpreter.
+    func bootstrap() {
         let fm = FileManager.default
         try? fm.createDirectory(atPath: bridgeDir, withIntermediateDirectories: true)
         try? fm.createDirectory(atPath: sourceDir, withIntermediateDirectories: true)
 
-        let helperPath = bridgeDir + "/pybridge.py"
-        try? Self.helperSource.write(toFile: helperPath, atomically: true, encoding: .utf8)
+        try? Self.helperSource.write(
+            toFile: bridgeDir + "/pybridge.py",
+            atomically: true,
+            encoding: .utf8
+        )
 
         let demoPath = sourceDir + "/demo.py"
         if !fm.fileExists(atPath: demoPath) {
             try? Self.demoSource.write(toFile: demoPath, atomically: true, encoding: .utf8)
         }
-
-        _ = PythonBridge.shared.run("""
-        import sys, os
-        sys.path.insert(0, r"\(bridgeDir)")
-        import pybridge
-        for _d in (r"\(bridgeDir)", r"\(sourceDir)"):
-            if not os.path.isdir(_d):
-                os.makedirs(_d)
-        """)
-        return helperPath
     }
 
     private func encode(_ s: String) -> String {
@@ -169,7 +158,7 @@ class Spider:
     }
 
     /// Calls `method` on the `Spider` instance defined by the python source at `scriptPath`.
-    func dispatch(scriptPath: String, method: String, args: [String: Any]) -> [String: Any] {
+    func dispatch(scriptPath: String, method: String, args: [String: Any]) async -> [String: Any] {
         let argsJSON = (try? JSONSerialization.data(withJSONObject: args))
             .flatMap { String(data: $0, encoding: .utf8) } ?? "{}"
 
@@ -179,11 +168,15 @@ class Spider:
         let code = """
         import sys, json
         sys.path.insert(0, r"\(bridgeDir)")
-        import pybridge
-        _r = pybridge.dispatch(r"\(encode(scriptPath))", r"\(encode(method))", r"\(encode(argsJSON))")
+        try:
+            import pybridge
+            _r = pybridge.dispatch(r"\(encode(scriptPath))", r"\(encode(method))", r"\(encode(argsJSON))")
+        except Exception:
+            import traceback
+            _r = json.dumps({'error': traceback.format_exc()})
         open(r"\(out)", "w", encoding="utf-8").write(_r)
         """
-        let rc = PythonBridge.shared.run(code)
+        let rc = await PythonBridge.shared.runAsync(code)
         guard rc == 0,
               let raw = try? String(contentsOfFile: out, encoding: .utf8),
               let data = raw.data(using: .utf8),
