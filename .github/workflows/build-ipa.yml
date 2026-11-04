@@ -5,6 +5,10 @@ on:
   push:
     branches: [main]
 
+env:
+  PY_VERSION: 3.13-b18
+  PY_ARCHIVE: Python-3.13-iOS-support.b18.tar.gz
+
 jobs:
   build:
     runs-on: xcode-27
@@ -15,6 +19,24 @@ jobs:
         run: |
           xcodebuild -version
           xcrun --sdk iphoneos --show-sdk-version
+
+      - name: Fetch CPython
+        run: |
+          curl -sL -o /tmp/py.tgz \
+            "https://github.com/beeware/Python-Apple-support/releases/download/${PY_VERSION}/${PY_ARCHIVE}"
+          mkdir -p /tmp/pyx
+          tar -xzf /tmp/py.tgz -C /tmp/pyx
+          mkdir -p Frameworks
+          rm -rf Frameworks/Python.xcframework
+          mv /tmp/pyx/Python.xcframework Frameworks/
+          cp -r Frameworks/Python.xcframework/lib /tmp/pyx/stdlib
+          du -sh Frameworks/Python.xcframework /tmp/pyx/stdlib
+          ls Frameworks/Python.xcframework
+
+      - name: Patch project
+        run: |
+          gem install xcodeproj --no-document
+          ruby scripts/inject_python.rb
 
       - name: Build archive
         run: |
@@ -31,8 +53,12 @@ jobs:
 
       - name: Package ipa
         run: |
-          mkdir Payload
+          set -e
+          mkdir -p Payload
           cp -r build/Aidoku.xcarchive/Products/Applications/Aidoku.app Payload
+          mkdir -p Payload/Aidoku.app/python
+          cp -r /tmp/pyx/stdlib Payload/Aidoku.app/python/lib
+          du -sh Payload/Aidoku.app
           zip -qry Aidoku-unsigned.ipa Payload
           ls -lh Aidoku-unsigned.ipa
 

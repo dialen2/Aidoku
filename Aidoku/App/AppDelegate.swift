@@ -106,6 +106,10 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
+        DispatchQueue.global(qos: .utility).async {
+            let pyResult = PythonBridge.shared.selfTest()
+            LogManager.logger.log("[pybridge] \(pyResult)")
+        }
         UserDefaults.standard.register(
             defaults: [
                 "History.lockHistoryTab": false,
