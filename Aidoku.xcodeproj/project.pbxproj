@@ -501,7 +501,7 @@
 				INFOPLIST_FILE = Aidoku/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Aidoku;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = NO;
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Aidoku needs FaceID permissions for user-defined settings";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Aidoku needs permission to connect to local Komga and Kavita servers";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Aidoku needs permission to save pages in your photo library";
@@ -544,7 +544,7 @@
 				INFOPLIST_FILE = Aidoku/Info.plist;
 				INFOPLIST_KEY_CFBundleDisplayName = Aidoku;
 				INFOPLIST_KEY_ITSAppUsesNonExemptEncryption = NO;
-				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = NO;
+				INFOPLIST_KEY_LSSupportsOpeningDocumentsInPlace = YES;
 				INFOPLIST_KEY_NSFaceIDUsageDescription = "Aidoku needs FaceID permissions for user-defined settings";
 				INFOPLIST_KEY_NSLocalNetworkUsageDescription = "Aidoku needs permission to connect to local Komga and Kavita servers";
 				INFOPLIST_KEY_NSPhotoLibraryUsageDescription = "Aidoku needs permission to save pages in your photo library";
