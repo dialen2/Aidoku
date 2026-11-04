@@ -52,6 +52,39 @@ extension AidokuRunner.Source {
                 listings.append(.init(id: id, name: title))
             }
         }
+        if !listings.isEmpty { return listings }
+
+        // Some spiders build the category table from a literal tuple list, e.g.
+        //   [("同人/汉化", "1"), ("单行/汉化", "9")]
+        // inside homeContent. Only scan that function body to avoid false hits.
+        let all = source as NSString
+        let anchor = all.range(of: "def homeContent")
+        guard anchor.location != NSNotFound else { return [] }
+        var body = all.substring(from: anchor.location)
+        if let next = body.range(of: "\n    def ") {
+            body = String(body[body.startIndex..<next.lowerBound])
+        }
+        let pairPattern = #"\(\s*["']([^"']{1,48})["']\s*,\s*["']([^"']{1,48})["']\s*\)"#
+        guard let pairRegex = try? NSRegularExpression(pattern: pairPattern) else { return [] }
+        let text = body as NSString
+        for match in pairRegex.matches(in: body, range: NSRange(location: 0, length: text.length)) {
+            guard match.numberOfRanges == 3 else { continue }
+            let a = text.substring(with: match.range(at: 1))
+            let b = text.substring(with: match.range(at: 2))
+            let bIsNumeric = !b.isEmpty && b.allSatisfy({ $0.isNumber })
+            let aIsNumeric = !a.isEmpty && a.allSatisfy({ $0.isNumber })
+            let id: String
+            let title: String
+            if bIsNumeric && !aIsNumeric {
+                id = b; title = a
+            } else if aIsNumeric && !bIsNumeric {
+                id = a; title = b
+            } else {
+                id = b; title = a
+            }
+            guard seen.insert(id).inserted else { continue }
+            listings.append(.init(id: id, name: title))
+        }
         return listings
     }
 }
@@ -134,8 +167,33 @@ final class PythonSourceRunner: AidokuRunner.Runner {
     // MARK: - Runner
 
     func getHome() async throws -> AidokuRunner.Home {
-        let raw = await call("homeContent", ["filter": false])
-        let list = entries(raw).compactMap { manga($0) }
+        // TVBox has two home hooks and spiders populate only one of them:
+        // - homeVideoContent() returns {list: [...]}  (the shelf)
+        // - homeContent(filter)    returns {class: [...]} (the categories, list optional)
+        // Neither is guaranteed, so probe in order and fall back to the first category.
+        let home = await call("homeContent", ["filter": false])
+        var list = entries(home).compactMap { manga($0) }
+
+        if list.isEmpty {
+            let video = await call("homeVideoContent", [String: Any]())
+            list = entries(video).compactMap { manga($0) }
+        }
+
+        var firstTid: String?
+        if let classes = (home["data"] as? [String: Any])?["class"] as? [[String: Any]] {
+            firstTid = classes.first?["type_id"] as? String
+        }
+
+        if list.isEmpty, let tid = firstTid, !tid.isEmpty {
+            let cat = await call("categoryContent", [
+                "tid": tid,
+                "pg": "1",
+                "filter": false,
+                "extend": [String: String](),
+            ])
+            list = entries(cat).compactMap { manga($0) }
+        }
+
         guard !list.isEmpty else { return .init(components: []) }
         return .init(components: [
             .init(title: nil, value: .mangaList(entries: list.map { $0.intoLink() })),

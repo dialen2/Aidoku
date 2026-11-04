@@ -31,6 +31,191 @@ try:
 except Exception:
     pass
 
+
+def _build_requests_shim():
+    import urllib.request as _ur, urllib.parse as _up, urllib.error as _ue, gzip as _gz, json as _js, ssl as _ss
+    import types as _t
+
+    class RequestException(IOError):
+        pass
+
+    class HTTPError(RequestException):
+        pass
+
+    class ConnectionError(RequestException):
+        pass
+
+    class Timeout(RequestException):
+        pass
+
+    class Response:
+        def __init__(self, status, headers, content, url):
+            self.status_code = status
+            self.headers = headers
+            self.content = content
+            self.url = url
+            self.encoding = None
+            self.reason = ''
+            self._decoded = None
+        @property
+        def ok(self):
+            return 200 <= self.status_code < 400
+        @property
+        def text(self):
+            if self._decoded is not None:
+                return self._decoded
+            enc = self.encoding
+            ct = (self.headers.get('Content-Encoding') and '') or (self.headers.get('Content-Type') or '')
+            low = ct.lower()
+            if 'charset=' in low:
+                enc = low.split('charset=')[1].split(';')[0].strip().strip('"').strip("'")
+            if not enc:
+                m = re.search(rb'charset=["\']?([\w-]+)', self.content[:4096], re.I)
+                enc = m.group(1).decode('ascii', 'ignore') if m else 'utf-8'
+            try:
+                self._decoded = self.content.decode(enc, 'ignore')
+            except LookupError:
+                self._decoded = self.content.decode('utf-8', 'ignore')
+            return self._decoded
+        def json(self):
+            return _js.loads(self.text)
+        def close(self):
+            return None
+        def raise_for_status(self):
+            if self.status_code >= 400:
+                raise HTTPError('%s %s' % (self.status_code, self.url))
+        def iter_content(self, chunk_size=8192, decode_unicode=False):
+            n = max(1, int(chunk_size or 8192))
+            for i in range(0, len(self.content), n):
+                yield self.content[i:i + n]
+        def __bool__(self):
+            return self.ok
+        def __repr__(self):
+            return '<Response [%s]>' % self.status_code
+
+    def _http(method, url, headers, data, params, proxies, timeout):
+        if params:
+            url = url + ('&' if '?' in url else '?') + _up.urlencode(params, doseq=True)
+        body = None
+        if data is not None:
+            if isinstance(data, bytes):
+                body = data
+            elif isinstance(data, dict) or isinstance(data, list):
+                body = _up.urlencode(data, doseq=True).encode('utf-8')
+                if not any(k.lower() == 'content-type' for k in headers):
+                    headers['Content-Type'] = 'application/x-www-form-urlencoded'
+            else:
+                body = str(data).encode('utf-8')
+        req = _ur.Request(url, data=body, method=(method or 'GET').upper())
+        for k, v in (headers or {}).items():
+            try:
+                req.add_header(k, str(v))
+            except Exception:
+                pass
+        handlers = []
+        if proxies:
+            clean = {k: v for k, v in proxies.items() if v}
+            if clean:
+                handlers.append(_ur.ProxyHandler(clean))
+        if str(url).lower().startswith('https'):
+            handlers.append(_ur.HTTPSHandler(context=_ss._create_unverified_context()))
+        opener = _ur.build_opener(*handlers)
+        try:
+            r = opener.open(req, timeout=(timeout or 20))
+            raw = r.read()
+            ce = (r.headers.get('Content-Encoding') or '').lower()
+            if 'gzip' in ce:
+                try:
+                    raw = _gz.decompress(raw)
+                except Exception:
+                    pass
+            return Response(r.status, r.headers, raw, r.geturl())
+        except _ue.HTTPError as e:
+            try:
+                payload = e.read()
+            except Exception:
+                payload = b''
+            return Response(e.code, e.headers, payload, url)
+        except Exception as e:
+            raise RequestException(str(e))
+
+    class Session:
+        def __init__(self):
+            self.headers = {}
+            self.cookies = {}
+            self.proxies = None
+            self.verify = False
+            self.params = {}
+        def _merge(self, kw):
+            h = dict(self.headers)
+            h.update(kw.pop('headers', None) or {})
+            kw.pop('verify', None)
+            kw.pop('allow_redirects', None)
+            kw.pop('stream', None)
+            px = kw.pop('proxies', None)
+            if px is None:
+                px = self.proxies
+            pr = dict(self.params)
+            pr.update(kw.pop('params', None) or {})
+            j = kw.pop('json', None)
+            d = kw.pop('data', None)
+            if j is not None:
+                d = _js.dumps(j)
+                h['Content-Type'] = 'application/json'
+            return h, d, pr, px
+        def request(self, method, url, **kw):
+            h, d, pr, px = self._merge(kw)
+            return _http(method, url, h, d, pr, px, kw.get('timeout'))
+        def get(self, url, **kw):
+            return self.request('GET', url, **kw)
+        def post(self, url, **kw):
+            return self.request('POST', url, **kw)
+        def put(self, url, **kw):
+            return self.request('PUT', url, **kw)
+        def delete(self, url, **kw):
+            return self.request('DELETE', url, **kw)
+        def head(self, url, **kw):
+            return self.request('HEAD', url, **kw)
+        def close(self):
+            return None
+
+    mod = _t.ModuleType('requests')
+    exc = _t.ModuleType('requests.exceptions')
+    for _n in ('RequestException', 'HTTPError', 'ConnectionError', 'Timeout'):
+        setattr(exc, _n, locals()[_n])
+        setattr(mod, _n, locals()[_n])
+    mod.exceptions = exc
+    mod.Session = Session
+    mod.Response = Response
+    mod.session = lambda: Session()
+
+    def _top(method):
+        def go(url, **kw):
+            s = Session()
+            return s.request(method, url, **kw)
+        return go
+
+    mod.get = _top('GET')
+    mod.post = _top('POST')
+    mod.put = _top('PUT')
+    mod.delete = _top('DELETE')
+    mod.head = _top('HEAD')
+    return mod, exc
+
+
+def _install_requests_shim():
+    try:
+        if 'requests' in sys.modules:
+            return
+        mod, exc = _build_requests_shim()
+        sys.modules['requests'] = mod
+        sys.modules['requests.exceptions'] = exc
+    except Exception:
+        pass
+
+
+_install_requests_shim()
+
 _LOCK = threading.Lock()
 _CACHE = {}
 
@@ -60,12 +245,21 @@ def _install_stubs():
 
 def _load_module(path):
     name = 'aidoku_src_' + os.path.basename(path).replace('.', '_').replace('-', '_')
-    if name in sys.modules:
-        return sys.modules[name]
+    cached = sys.modules.get(name)
+    if cached is not None and getattr(cached, 'Spider', None) is not None:
+        return cached
+    sys.modules.pop(name, None)
     spec = importlib.util.spec_from_file_location(name, path)
     mod = importlib.util.module_from_spec(spec)
     sys.modules[name] = mod
-    spec.loader.exec_module(mod)
+    try:
+        spec.loader.exec_module(mod)
+    except BaseException:
+        sys.modules.pop(name, None)
+        raise
+    if getattr(mod, 'Spider', None) is None:
+        sys.modules.pop(name, None)
+        raise RuntimeError('no Spider class in ' + path)
     return mod
 
 def get_spider(path):
@@ -75,8 +269,6 @@ def get_spider(path):
         _install_stubs()
         mod = _load_module(path)
         cls = getattr(mod, 'Spider', None)
-        if cls is None:
-            raise RuntimeError('no Spider class in ' + path)
         spider = cls()
         try:
             spider.init('')

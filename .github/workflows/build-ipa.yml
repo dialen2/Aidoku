@@ -38,6 +38,26 @@ jobs:
           gem install xcodeproj --no-document
           ruby scripts/inject_python.rb
 
+      - name: Vendor pure-python packages
+        run: |
+          set -e
+          rm -rf /tmp/site && mkdir -p /tmp/site
+          python3 -m pip install --quiet --no-warn-script-location \
+            --target /tmp/site --upgrade --no-compile \
+            beautifulsoup4 soupsieve requests urllib3 certifi idna charset_normalizer || true
+          # Any compiled slice shipped in those wheels targets the runner, not
+          # iOS, so drop them and let the pure-python fallbacks take over.
+          find /tmp/site -name "*.so" -delete || true
+          find /tmp/site -name "*.pyd" -delete || true
+          find /tmp/site -name "__pycache__" -type d -prune -exec rm -rf {} + || true
+          python3 - <<'EOF'
+          import os
+          site = "/tmp/site"
+          print("vendored:", sorted(os.listdir(site)))
+          print("size:", sum(os.path.getsize(os.path.join(r, f))
+                for r, _, fs in os.walk(site) for f in fs) // 1024, "KiB")
+          EOF
+
       - name: Build archive
         run: |
           xcodebuild -scheme "Aidoku" \
@@ -62,6 +82,10 @@ jobs:
           # framework stdlib; they live in the xcframework's per-arch lib dir.
           # Only device slices: the xcframework also ships *-iphonesimulator.so,
           # which cannot be dlopen'ed on a real device.
+          SITE=Payload/Aidoku.app/python/lib/python3.13/site-packages
+          mkdir -p "$SITE"
+          if [ -d /tmp/site ]; then cp -R /tmp/site/* "$SITE"/ 2>/dev/null || true; fi
+          echo "site-packages: $(du -sh "$SITE" | cut -f1)"
           DEST=Payload/Aidoku.app/python/lib/python3.13/lib-dynload
           mkdir -p "$DEST"
           find Frameworks/Python.xcframework -name "*iphoneos.so" -exec cp -L {} "$DEST"/ \;
