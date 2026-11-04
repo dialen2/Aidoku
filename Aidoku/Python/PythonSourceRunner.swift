@@ -12,6 +12,7 @@ extension AidokuRunner.Source {
     static func python(key: String, script: String) -> AidokuRunner.Source {
         let name = (script as NSString).lastPathComponent
             .replacingOccurrences(of: ".py", with: "")
+        let source = (try? String(contentsOfFile: script, encoding: .utf8)) ?? ""
         return .init(
             url: URL(fileURLWithPath: script),
             key: key,
@@ -21,18 +22,44 @@ extension AidokuRunner.Source {
             urls: [],
             contentRating: .safe,
             config: .init(languageSelectType: .single),
-            staticListings: [],
+            staticListings: pythonListings(from: source),
             staticFilters: [],
             staticSettings: [],
             runner: PythonSourceRunner(sourceKey: key, scriptPath: script)
         )
     }
+
+    /// TVBox spiders declare categories as literal `{"type_id": ..., "type_name": ...}`
+    /// dicts in `homeContent`. Scrape them so the browser shows real listings
+    /// without waiting on a network round trip.
+    static func pythonListings(from source: String) -> [AidokuRunner.Listing] {
+        let patterns = [
+            #"type_id["']?\s*:\s*["']([^"']+)["'][^}]*?type_name["']?\s*:\s*["']([^"']+)["']"#,
+            #"type_name["']?\s*:\s*["']([^"']+)["'][^}]*?type_id["']?\s*:\s*["']([^"']+)["']"#,
+        ]
+        var seen = Set<String>()
+        var listings: [AidokuRunner.Listing] = []
+        for (index, pattern) in patterns.enumerated() {
+            guard let regex = try? NSRegularExpression(pattern: pattern) else { continue }
+            let text = source as NSString
+            for match in regex.matches(in: source, range: NSRange(location: 0, length: text.length)) {
+                guard match.numberOfRanges == 3 else { continue }
+                let first = text.substring(with: match.range(at: 1))
+                let second = text.substring(with: match.range(at: 2))
+                let id = index == 0 ? first : second
+                let title = index == 0 ? second : first
+                guard !id.isEmpty, !title.isEmpty, seen.insert(id).inserted else { continue }
+                listings.append(.init(id: id, name: title))
+            }
+        }
+        return listings
+    }
 }
 
 final class PythonSourceRunner: AidokuRunner.Runner {
     let features = AidokuRunner.SourceFeatures(
-        providesListings: false,
-        providesHome: false,
+        providesListings: true,
+        providesHome: true,
         dynamicFilters: false,
         dynamicSettings: false,
         dynamicListings: false,
@@ -105,6 +132,29 @@ final class PythonSourceRunner: AidokuRunner.Runner {
     }
 
     // MARK: - Runner
+
+    func getHome() async throws -> AidokuRunner.Home {
+        let raw = await call("homeContent", ["filter": false])
+        let list = entries(raw).compactMap { manga($0) }
+        guard !list.isEmpty else { return .init(sections: []) }
+        return .init(sections: [
+            .init(id: "home", title: "最近更新", entries: list),
+        ])
+    }
+
+    func getMangaList(
+        listing: AidokuRunner.Listing,
+        page: Int
+    ) async throws -> AidokuRunner.MangaPageResult {
+        let raw = await call("categoryContent", [
+            "tid": listing.id,
+            "pg": String(page),
+            "filter": false,
+            "extend": [String: String](),
+        ])
+        let list = entries(raw).compactMap { manga($0) }
+        return .init(entries: list, hasNextPage: !list.isEmpty)
+    }
 
     func getSearchMangaList(
         query: String?,
