@@ -110,6 +110,11 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
             let pyResult = PythonBridge.shared.selfTest()
             LogManager.logger.log("[pybridge] \(pyResult)")
         }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 4) {
+            Task { @MainActor in
+                await SourceManager.shared.syncPythonSources()
+            }
+        }
         UserDefaults.standard.register(
             defaults: [
                 "History.lockHistoryTab": false,

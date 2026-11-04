@@ -585,6 +585,7 @@ extension SourceManager {
         case komga(ServerConfig)
         case kavita(ServerConfig)
         case suwayomi(ServerConfig)
+        case python(script: String)
 
         struct ServerConfig {
             let name: String
@@ -602,6 +603,19 @@ extension SourceManager {
                 config = CustomSourceConfig.local
             case .demo:
                 config = CustomSourceConfig.demo
+            case .python(let script):
+                let base = (script as NSString).lastPathComponent
+                    .replacingOccurrences(of: ".py", with: "")
+                let ascii = String(base.unicodeScalars.filter {
+                    CharacterSet.alphanumerics.contains($0)
+                })
+                var key = "python.\(ascii.isEmpty ? "src" : ascii)"
+                var counter = 1
+                while sourcesByKey[key] != nil || disabledSourceKeys.contains(key) {
+                    key = "python.\(ascii.isEmpty ? "src" : ascii)-\(counter)"
+                    counter += 1
+                }
+                config = CustomSourceConfig.python(key: key, script: script)
             case .komga(let serverConfig), .kavita(let serverConfig), .suwayomi(let serverConfig):
                 let name = serverConfig.name
                 let server = serverConfig.server
@@ -612,7 +626,7 @@ extension SourceManager {
                     case .komga: KomgaSourceRunner.sourceKeyPrefix
                     case .kavita: KavitaSourceRunner.sourceKeyPrefix
                     case .suwayomi: SuwayomiSourceRunner.sourceKeyPrefix
-                    case .local, .demo: unreachable()
+                    case .local, .demo, .python: unreachable()
                 }
                 let nameEncoded = name.lowercased().replacingOccurrences(of: " ", with: "-")
                 var key = "\(keyPrefix).\(nameEncoded)"
@@ -629,7 +643,7 @@ extension SourceManager {
                     case .komga: CustomSourceConfig.komga(configValues)
                     case .kavita: CustomSourceConfig.kavita(configValues)
                     case .suwayomi: CustomSourceConfig.suwayomi(configValues)
-                    case .local, .demo: unreachable()
+                    case .local, .demo, .python: unreachable()
                 }
 
                 // register details
@@ -959,5 +973,27 @@ extension SourceManager {
 
     private func notifySourceListsLoaded() {
         NotificationCenter.default.post(name: .updateSourceLists, object: nil)
+    }
+}
+
+// MARK: - Python Sources
+extension SourceManager {
+    /// Auto-registers every `.py` file dropped into `Documents/pysrc`.
+    func syncPythonSources() async {
+        _ = PythonRuntime.shared.bootstrap()
+
+        let dir = PythonRuntime.shared.sourceDir
+        let files = (try? FileManager.default.contentsOfDirectory(atPath: dir)) ?? []
+
+        for file in files.sorted() where file.hasSuffix(".py") {
+            let path = dir + "/" + file
+            let alreadyLoaded = sourcesByKey.values.contains { source in
+                (source.runner as? PythonSourceRunner)?.scriptPath == path
+            }
+            if alreadyLoaded { continue }
+
+            let key = await createCustomSource(.python(script: path))
+            LogManager.logger.log("[python] registered source \(file) -> \(key ?? "nil")")
+        }
     }
 }

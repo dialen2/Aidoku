@@ -14,6 +14,7 @@ enum CustomSourceConfig {
     case komga(KeyNameServer)
     case kavita(KeyNameServer)
     case suwayomi(KeyNameServer)
+    case python(key: String, script: String)
 
     struct KeyNameServer {
         let key: String
@@ -35,6 +36,8 @@ extension CustomSourceConfig {
                 .kavita(key: config.key, name: config.name, server: config.server)
             case let .suwayomi(config):
                 .suwayomi(key: config.key, name: config.name, server: config.server)
+            case let .python(key, script):
+                .python(key: key, script: script)
         }
     }
 }
@@ -85,6 +88,10 @@ extension CustomSourceConfig {
                 let name = try decodeString()
                 let server = try decodeString()
                 self = .suwayomi(.init(key: key, name: name, server: server))
+            case 5:
+                let key = try decodeString()
+                let script = try decodeString()
+                self = .python(key: key, script: script)
             default:
                 throw DecodingError.dataCorrupted(.init(
                     codingPath: [],
@@ -118,6 +125,13 @@ extension CustomSourceConfig {
             case let .suwayomi(config):
                 bytes.append(4)
                 for string in [config.key, config.name, config.server] {
+                    let utf8 = [UInt8](string.utf8)
+                    varInt(UInt64(utf8.count), data: &bytes)
+                    bytes.append(contentsOf: utf8)
+                }
+            case let .python(key, script):
+                bytes.append(5)
+                for string in [key, script] {
                     let utf8 = [UInt8](string.utf8)
                     varInt(UInt64(utf8.count), data: &bytes)
                     bytes.append(contentsOf: utf8)
