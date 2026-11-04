@@ -106,7 +106,7 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         _ application: UIApplication,
         didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]? = nil
     ) -> Bool {
-        DispatchQueue.global(qos: .utility).async {
+        DispatchQueue.global(qos: .utility).asyncAfter(deadline: .now() + 5) {
             let pyResult = PythonBridge.shared.selfTest()
             LogManager.logger.log("[pybridge] \(pyResult)")
         }

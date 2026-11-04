@@ -21,16 +21,33 @@ Dir.glob('Aidoku/Python/*.swift').sort.each do |path|
   puts "added source: #{path}"
 end
 
-# 2. Python.xcframework (static, do not embed)
-unless project.files.any? { |f| f.path == XCFRAMEWORK }
+# 2. Framework reference
+framework_ref = project.files.find { |f| f.path == XCFRAMEWORK }
+unless framework_ref
   abort("missing #{XCFRAMEWORK}") unless File.exist?(XCFRAMEWORK)
 
-  ref = project.main_group.new_reference(XCFRAMEWORK)
-  target.frameworks_build_phase.add_file_reference(ref, true)
+  framework_ref = project.main_group.new_reference(XCFRAMEWORK)
+  target.frameworks_build_phase.add_file_reference(framework_ref, true)
   puts "linked framework: #{XCFRAMEWORK}"
 end
 
-# 3. Build settings
+# 3. Embed it. Python.framework is MH_DYLIB, not a static archive --
+#    without an Embed Frameworks phase dyld fails at launch.
+embed = target.copy_files_build_phases.find { |p| p.name == 'Embed Frameworks' }
+unless embed
+  embed = target.new_copy_files_build_phase('Embed Frameworks')
+  embed.dst_subfolder_spec = '10'
+  embed.dst_path = ''
+  puts 'created Embed Frameworks phase'
+end
+
+unless embed.files.any? { |f| f.file_ref == framework_ref }
+  build_file = embed.add_file_reference(framework_ref, true)
+  build_file.settings = { 'ATTRIBUTES' => ['CodeSignOnCopy', 'RemoveHeadersOnCopy'] }
+  puts "embedded framework: #{XCFRAMEWORK}"
+end
+
+# 4. Build settings
 target.build_configurations.each do |config|
   settings = config.build_settings
 

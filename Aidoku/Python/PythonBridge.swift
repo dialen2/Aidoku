@@ -3,7 +3,7 @@
 //  Aidoku
 //
 //  Embedded CPython runtime bridge.
-//  Python is linked as a static framework through the bridging header.
+//  Python is linked as a dynamic framework and embedded into the app bundle.
 //
 
 import Foundation
@@ -20,6 +20,15 @@ final class PythonBridge: @unchecked Sendable {
         Bundle.main.bundlePath + "/python"
     }
 
+    var reportPath: String {
+        let dir = FileManager.default.urls(for: .documentDirectory, in: .userDomainMask)[0]
+        return dir.appendingPathComponent("pycheck.json").path
+    }
+
+    private func writeReport(_ text: String) {
+        try? text.write(toFile: reportPath, atomically: true, encoding: .utf8)
+    }
+
     // must be called on `queue`
     private func prepareLocked() -> Bool {
         if ready { return true }
@@ -28,8 +37,12 @@ final class PythonBridge: @unchecked Sendable {
         setenv("PYTHONPATH", home + "/lib/python3.13", 1)
         setenv("PYTHONDONTWRITEBYTECODE", "1", 1)
         setenv("PYTHONUTF8", "1", 1)
+        writeReport("{\"stage\":\"before-init\",\"home\":\"\(home)\"}")
         Py_Initialize()
-        guard Py_IsInitialized() != 0 else { return false }
+        guard Py_IsInitialized() != 0 else {
+            writeReport("{\"stage\":\"init-failed\"}")
+            return false
+        }
         ready = true
         return true
     }
@@ -48,15 +61,24 @@ final class PythonBridge: @unchecked Sendable {
     }
 
     func selfTest() -> String {
-        let out = NSTemporaryDirectory() + "aidoku-pycheck.json"
+        writeReport("{\"stage\":\"selftest-begin\"}")
+        let out = NSTemporaryDirectory() + "aidoku-pyout.json"
         try? FileManager.default.removeItem(atPath: out)
         let code = """
-        import sys, json
-        data = {"version": sys.version.split()[0], "prefix": sys.prefix, "ok": True}
+        import sys, json, os
+        data = {
+            "ok": True,
+            "version": sys.version,
+            "prefix": sys.prefix,
+            "executable": sys.executable,
+            "cwd": os.getcwd(),
+        }
         open(r"\(out)", "w").write(json.dumps(data))
         """
         let rc = run(code)
         let body = (try? String(contentsOfFile: out, encoding: .utf8)) ?? "<no output>"
-        return "rc=\(rc) \(body)"
+        let report = "{\"stage\":\"done\",\"rc\":\(rc),\"body\":\(body.debugDescription)}"
+        writeReport(report)
+        return report
     }
 }
