@@ -58,6 +58,15 @@ jobs:
           cp -r build/Aidoku.xcarchive/Products/Applications/Aidoku.app Payload
           mkdir -p Payload/Aidoku.app/python
           cp -r /tmp/pyx/stdlib Payload/Aidoku.app/python/lib
+          # C extension modules (_struct, _json, _socket, _ssl, ...) are not in the
+          # framework stdlib; they live in the xcframework's per-arch lib dir.
+          DYNLOAD=$(find Frameworks/Python.xcframework -type d -name lib-dynload | head -1)
+          echo "lib-dynload: $DYNLOAD"
+          test -n "$DYNLOAD"
+          mkdir -p Payload/Aidoku.app/python/lib/python3.13/lib-dynload
+          cp -L "$DYNLOAD"/*.so Payload/Aidoku.app/python/lib/python3.13/lib-dynload/
+          echo "dynload modules: $(ls Payload/Aidoku.app/python/lib/python3.13/lib-dynload | wc -l)"
+          ls Payload/Aidoku.app/python/lib/python3.13/lib-dynload | grep -q "_struct" && echo "_struct present"
           du -sh Payload/Aidoku.app
           zip -qry Aidoku-unsigned.ipa Payload
           ls -lh Aidoku-unsigned.ipa

@@ -112,14 +112,26 @@ final class PythonBridge: @unchecked Sendable {
         try? FileManager.default.removeItem(atPath: out)
         let code = """
         import sys, json, os, threading
+        mods = {}
+        for _m in ("_struct", "_json", "_socket", "_ssl", "_hashlib", "zlib", "binascii",
+                   "_datetime", "_csv", "_pickle", "unicodedata", "pyexpat", "_elementtree",
+                   "_ctypes", "_sqlite3", "base64", "urllib.request"):
+            try:
+                __import__(_m)
+                mods[_m] = "ok"
+            except Exception as _e:
+                mods[_m] = "FAIL: " + repr(_e)
+        dyn = sys.prefix + "/lib/python3.13/lib-dynload"
         data = {
             "ok": True,
             "version": sys.version,
             "prefix": sys.prefix,
             "thread": threading.current_thread().name,
-            "cwd": os.getcwd(),
+            "dynload_exists": os.path.isdir(dyn),
+            "dynload_count": len(os.listdir(dyn)) if os.path.isdir(dyn) else 0,
+            "modules": mods,
         }
-        open(r"\(out)", "w").write(json.dumps(data))
+        open(r"\(out)", "w").write(json.dumps(data, ensure_ascii=False))
         """
         let rc = await runAsync(code)
         let body = (try? String(contentsOfFile: out, encoding: .utf8)) ?? "<no output>"
