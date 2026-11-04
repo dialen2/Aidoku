@@ -38,13 +38,28 @@ final class PythonSourceRunner: AidokuRunner.Runner {
         dynamicListings: false,
         processesPages: false,
         processesCovers: false,
-        providesImageRequests: false,
+        providesImageRequests: true,
         providesPageDescriptions: false,
         providesBaseUrl: false
     )
 
     let sourceKey: String
     let scriptPath: String
+
+    private var imageHeaders: [String: String] = [:]
+    private let imageHeadersLock = NSLock()
+
+    private func updateImageHeaders(_ headers: [String: String]) {
+        imageHeadersLock.lock()
+        imageHeaders = headers
+        imageHeadersLock.unlock()
+    }
+
+    private func currentImageHeaders() -> [String: String] {
+        imageHeadersLock.lock()
+        defer { imageHeadersLock.unlock() }
+        return imageHeaders
+    }
 
     init(sourceKey: String, scriptPath: String) {
         self.sourceKey = sourceKey
@@ -151,15 +166,42 @@ final class PythonSourceRunner: AidokuRunner.Runner {
         guard let data = raw["data"] as? [String: Any] else { return [] }
 
         // TVBox comic sources put the image list in `url`; some use `data`.
-        let blob = Self.str(data["url"]) ?? Self.str(data["data"]) ?? ""
+        var blob = Self.str(data["url"]) ?? Self.str(data["data"]) ?? ""
         guard !blob.isEmpty else { return [] }
 
-        return blob
-            .split(separator: "#")
-            .compactMap { piece -> AidokuRunner.Page? in
-                let text = String(piece).trimmingCharacters(in: .whitespacesAndNewlines)
-                guard let parsed = URL(string: text), parsed.scheme != nil else { return nil }
-                return AidokuRunner.Page(content: .url(url: parsed))
+        // Standard TVBox comic convention: "pics://img1&&img2&&img3"
+        if blob.hasPrefix("pics://") {
+            blob = String(blob.dropFirst("pics://".count))
+        }
+
+        // Image hotlink protection: prefer headers embedded in the payload,
+        // otherwise ask the spider for its getHeader().
+        if let inline = data["header"] as? [String: String], !inline.isEmpty {
+            updateImageHeaders(inline)
+        } else {
+            let headerRaw = await call("getHeader", [:])
+            if headerRaw["error"] == nil, let headers = headerRaw["data"] as? [String: String] {
+                updateImageHeaders(headers)
             }
+        }
+
+        let pieces: [String] = blob.contains("&&")
+            ? blob.components(separatedBy: "&&")
+            : blob.components(separatedBy: "#")
+
+        return pieces.compactMap { piece -> AidokuRunner.Page? in
+            let text = piece.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !text.isEmpty, let parsed = URL(string: text), parsed.scheme != nil else { return nil }
+            return AidokuRunner.Page(content: .url(url: parsed))
+        }
+    }
+
+    func getImageRequest(url: String, context: AidokuRunner.PageContext?) async throws -> URLRequest {
+        guard let parsed = URL(string: url) else { throw URLError(.badURL) }
+        var request = URLRequest(url: parsed)
+        for (key, value) in currentImageHeaders() {
+            request.setValue(value, forHTTPHeaderField: key)
+        }
+        return request
     }
 }
