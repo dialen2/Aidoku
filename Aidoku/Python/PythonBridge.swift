@@ -3,8 +3,16 @@
 //  Aidoku
 //
 //  Embedded CPython runtime bridge.
-//  Python is linked as a dynamic framework and embedded into the app bundle.
-//  Every interpreter call is serialized on a background queue -- never the main thread.
+//
+//  Why a dedicated thread instead of a DispatchQueue:
+//  Py_Initialize() binds a PyThreadState to the *pthread* that ran it. GCD
+//  serial queues do not guarantee the same thread between blocks, so a later
+//  call can land on a worker with no thread state and segfault inside
+//  _PyObject_Malloc (KERN_INVALID_ADDRESS at 0x10). A dedicated Thread keeps
+//  pthread, thread state and GIL constant for the whole app lifetime.
+//
+//  Stack size is raised to 8 MB: iOS secondary threads default to 512 KB,
+//  which is not enough headroom for the interpreter.
 //
 
 import Foundation
@@ -12,8 +20,13 @@ import Foundation
 final class PythonBridge: @unchecked Sendable {
     static let shared = PythonBridge()
 
-    private let queue = DispatchQueue(label: "app.aidoku.python", qos: .userInitiated)
-    private var ready = false
+    private var thread: Thread?
+    private let ioLock = NSLock()
+    private let requestSem = DispatchSemaphore(value: 0)
+    private let replySem = DispatchSemaphore(value: 0)
+    private var pendingCode: String?
+    private var pendingResult: Int32 = -1
+    private var bootFailed = false
 
     private init() {}
 
@@ -30,33 +43,66 @@ final class PythonBridge: @unchecked Sendable {
         try? text.write(toFile: reportPath, atomically: true, encoding: .utf8)
     }
 
-    // must be called on `queue`
-    private func prepareLocked() -> Bool {
-        if ready { return true }
+    // Runs on the dedicated python thread only.
+    private func prepareOnWorker() {
         let home = homePath
         setenv("PYTHONHOME", home, 1)
         setenv("PYTHONPATH", home + "/lib/python3.13", 1)
         setenv("PYTHONDONTWRITEBYTECODE", "1", 1)
         setenv("PYTHONUTF8", "1", 1)
+        setenv("PYTHONMALLOC", "malloc", 1)
+
         writeReport("{\"stage\":\"before-init\",\"home\":\"\(home)\"}")
         Py_Initialize()
-        guard Py_IsInitialized() != 0 else {
+        if Py_IsInitialized() == 0 {
+            bootFailed = true
             writeReport("{\"stage\":\"init-failed\"}")
-            return false
+            return
         }
-        ready = true
-        return true
+        // No PyEval_SaveThread: this thread is the only Python user, it keeps
+        // the GIL from initialization to process exit.
+        writeReport("{\"stage\":\"ready\",\"home\":\"\(home)\"}")
     }
 
-    /// Runs python source on the background queue. Never blocks the caller.
+    private func workerMain() {
+        prepareOnWorker()
+        while true {
+            requestSem.wait()
+            guard !bootFailed, let code = pendingCode else {
+                pendingResult = -1
+                replySem.signal()
+                continue
+            }
+            pendingCode = nil
+            pendingResult = PyRun_SimpleString(code)
+            replySem.signal()
+        }
+    }
+
+    private func ensureWorker() {
+        guard thread == nil else { return }
+        let worker = Thread { [weak self] in
+            self?.workerMain()
+        }
+        worker.name = "app.aidoku.python"
+        worker.stackSize = 8 * 1024 * 1024
+        worker.qualityOfService = .userInitiated
+        worker.start()
+        thread = worker
+    }
+
+    /// Runs python source on the dedicated interpreter thread. Never blocks the main thread.
     func runAsync(_ code: String) async -> Int32 {
         await withCheckedContinuation { (continuation: CheckedContinuation<Int32, Never>) in
-            queue.async {
-                guard self.prepareLocked() else {
-                    continuation.resume(returning: -1)
-                    return
-                }
-                continuation.resume(returning: PyRun_SimpleString(code))
+            DispatchQueue.global(qos: .userInitiated).async {
+                self.ioLock.lock()
+                self.ensureWorker()
+                self.pendingCode = code
+                self.requestSem.signal()
+                self.replySem.wait()
+                let rc = self.pendingResult
+                self.ioLock.unlock()
+                continuation.resume(returning: rc)
             }
         }
     }
@@ -65,14 +111,13 @@ final class PythonBridge: @unchecked Sendable {
         let out = NSTemporaryDirectory() + "aidoku-pyout.json"
         try? FileManager.default.removeItem(atPath: out)
         let code = """
-        import sys, json, os
+        import sys, json, os, threading
         data = {
             "ok": True,
             "version": sys.version,
             "prefix": sys.prefix,
-            "executable": sys.executable,
+            "thread": threading.current_thread().name,
             "cwd": os.getcwd(),
-            "files": sorted(os.listdir(sys.prefix + "/lib/python3.13")),
         }
         open(r"\(out)", "w").write(json.dumps(data))
         """
