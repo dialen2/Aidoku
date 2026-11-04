@@ -1015,6 +1015,14 @@ extension SourceManager {
             Self.syncLog("registering \(file)")
             let key = await createCustomSource(.python(script: path))
             Self.syncLog("registered \(file) -> \(key ?? "nil")")
+
+            // Probe the bridge immediately so the log alone tells us if python works.
+            let probe = await PythonRuntime.shared.dispatch(
+                scriptPath: path,
+                method: "searchContent",
+                args: ["key": "probe", "quick": false, "pg": "1"]
+            )
+            Self.syncLog("probe \(file) -> \(String(describing: probe).prefix(1200))")
         }
         Self.syncLog("sync end")
     }

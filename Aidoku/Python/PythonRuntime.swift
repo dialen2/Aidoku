@@ -147,6 +147,10 @@ class Spider:
             encoding: .utf8
         )
 
+        let helperSize = (try? fm.attributesOfItem(atPath: bridgeDir + "/pybridge.py")[.size])
+            .flatMap { $0 as? Int } ?? -1
+        appendLog("bootstrap bridge=\(bridgeDir) helperBytes=\(helperSize)")
+
         let demoPath = sourceDir + "/demo.py"
         if !fm.fileExists(atPath: demoPath) {
             try? Self.demoSource.write(toFile: demoPath, atomically: true, encoding: .utf8)
@@ -155,6 +159,18 @@ class Spider:
 
     private func encode(_ s: String) -> String {
         Data(s.utf8).base64EncodedString()
+    }
+
+    private func appendLog(_ text: String) {
+        let path = documents + "/pydispatch.log"
+        let line = "[\(Date())] \(text)\n"
+        if let handle = FileHandle(forWritingAtPath: path) {
+            handle.seekToEndOfFile()
+            handle.write(Data(line.utf8))
+            handle.closeFile()
+        } else {
+            try? line.write(toFile: path, atomically: true, encoding: .utf8)
+        }
     }
 
     /// Calls `method` on the `Spider` instance defined by the python source at `scriptPath`.
@@ -176,9 +192,11 @@ class Spider:
             _r = json.dumps({'error': traceback.format_exc()})
         open(r"\(out)", "w", encoding="utf-8").write(_r)
         """
+        appendLog("begin method=\(method) script=\(scriptPath)")
         let rc = await PythonBridge.shared.runAsync(code)
+        let raw = (try? String(contentsOfFile: out, encoding: .utf8)) ?? "<no file>"
+        appendLog("end method=\(method) rc=\(rc) out=\(raw.prefix(4000))")
         guard rc == 0,
-              let raw = try? String(contentsOfFile: out, encoding: .utf8),
               let data = raw.data(using: .utf8),
               let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
             return ["error": "bridge failed rc=\(rc)"]
