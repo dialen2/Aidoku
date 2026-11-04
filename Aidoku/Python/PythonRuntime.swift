@@ -65,7 +65,7 @@ def _build_requests_shim():
             if self._decoded is not None:
                 return self._decoded
             enc = self.encoding
-            ct = (self.headers.get('Content-Encoding') and '') or (self.headers.get('Content-Type') or '')
+            ct = self.headers.get('Content-Type') or ''
             low = ct.lower()
             if 'charset=' in low:
                 enc = low.split('charset=')[1].split(';')[0].strip().strip('"').strip("'")
@@ -93,6 +93,42 @@ def _build_requests_shim():
         def __repr__(self):
             return '<Response [%s]>' % self.status_code
 
+    import time as _time
+    _POOL = None
+    try:
+        import urllib3 as _u3
+        try:
+            _u3.disable_warnings()
+        except Exception:
+            pass
+        _POOL = _u3.PoolManager(
+            num_pools=8, maxsize=8, block=False,
+            cert_reqs=_ss.CERT_NONE, assert_hostname=False,
+        )
+    except Exception:
+        _POOL = None
+
+    _HC = {}
+    _HC_TTL = 120.0
+    _INFLIGHT = {}
+
+    def _hc_get(k):
+        e = _HC.get(k)
+        if e is not None and e[0] > _time.time():
+            return e[1]
+        ev = _INFLIGHT.get(k)
+        if ev is not None:
+            ev.wait(25)
+            e = _HC.get(k)
+            if e is not None and e[0] > _time.time():
+                return e[1]
+        return None
+
+    def _hc_put(k, v):
+        if len(_HC) > 96:
+            _HC.clear()
+        _HC[k] = (_time.time() + _HC_TTL, v)
+
     def _http(method, url, headers, data, params, proxies, timeout):
         if params:
             url = url + ('&' if '?' in url else '?') + _up.urlencode(params, doseq=True)
@@ -100,24 +136,58 @@ def _build_requests_shim():
         if data is not None:
             if isinstance(data, bytes):
                 body = data
-            elif isinstance(data, dict) or isinstance(data, list):
+            elif isinstance(data, (dict, list, tuple)):
                 body = _up.urlencode(data, doseq=True).encode('utf-8')
                 if not any(k.lower() == 'content-type' for k in headers):
                     headers['Content-Type'] = 'application/x-www-form-urlencoded'
             else:
                 body = str(data).encode('utf-8')
-        req = _ur.Request(url, data=body, method=(method or 'GET').upper())
-        for k, v in (headers or {}).items():
+        if not any(k.lower() == 'accept-encoding' for k in headers):
+            headers['Accept-Encoding'] = 'gzip, deflate'
+        verb = (method or 'GET').upper()
+        ck = verb + ' ' + url if verb == 'GET' else ''
+        if ck:
+            cached = _hc_get(ck)
+            if cached is not None:
+                return Response(cached[0], cached[1], cached[2], url)
+            _INFLIGHT[ck] = threading.Event()
+        try:
+            return _fetch(verb, url, headers, body, clean_proxies(proxies), ck, timeout)
+        finally:
+            if ck:
+                ev = _INFLIGHT.pop(ck, None)
+                if ev is not None:
+                    ev.set()
+
+    def clean_proxies(proxies):
+        return {k: v for k, v in (proxies or {}).items() if v}
+
+    def _fetch(verb, url, headers, body, clean, ck, timeout):
+
+        if _POOL is not None and not clean:
+            try:
+                r = _POOL.request(
+                    verb, url, body=body, headers=headers, redirect=True,
+                    retries=False, preload_content=True,
+                    timeout=_u3.Timeout(connect=min(timeout or 20, 8), read=timeout or 20),
+                )
+                content = r.data
+                if ck and 200 <= r.status < 400:
+                    _hc_put(ck, (r.status, r.headers, content))
+                return Response(r.status, r.headers, content, url)
+            except Exception:
+                pass
+
+        req = _ur.Request(url, data=body, method=verb)
+        for k, v in headers.items():
             try:
                 req.add_header(k, str(v))
             except Exception:
                 pass
         handlers = []
-        if proxies:
-            clean = {k: v for k, v in proxies.items() if v}
-            if clean:
-                handlers.append(_ur.ProxyHandler(clean))
-        if str(url).lower().startswith('https'):
+        if clean:
+            handlers.append(_ur.ProxyHandler(clean))
+        if url.lower().startswith('https'):
             handlers.append(_ur.HTTPSHandler(context=_ss._create_unverified_context()))
         opener = _ur.build_opener(*handlers)
         try:
@@ -129,7 +199,9 @@ def _build_requests_shim():
                     raw = _gz.decompress(raw)
                 except Exception:
                     pass
-            return Response(r.status, r.headers, raw, r.geturl())
+            if ck and 200 <= r.status < 400:
+                _hc_put(ck, (r.status, r.headers, raw))
+            return Response(r.status, r.headers, raw, url)
         except _ue.HTTPError as e:
             try:
                 payload = e.read()
@@ -262,6 +334,26 @@ def _load_module(path):
         raise RuntimeError('no Spider class in ' + path)
     return mod
 
+def _warmup_shelf(spider):
+    try:
+        import time as _wt
+        _wt.sleep(0.02)
+        fn = getattr(spider, 'homeVideoContent', None)
+        if fn is not None:
+            fn()
+    except Exception:
+        pass
+
+
+def _spawn_warmup(spider):
+    try:
+        t = threading.Thread(target=_warmup_shelf, args=(spider,))
+        t.daemon = True
+        t.start()
+    except Exception:
+        pass
+
+
 def get_spider(path):
     with _LOCK:
         if path in _CACHE:
@@ -275,6 +367,7 @@ def get_spider(path):
         except Exception:
             pass
         _CACHE[path] = spider
+        _spawn_warmup(spider)
         return spider
 
 def dispatch(script_b64, method_b64, args_b64):
